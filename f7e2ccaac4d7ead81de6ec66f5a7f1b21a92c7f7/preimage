@@ -1,0 +1,6 @@
+<<<<<<<
+--requirement requirements.txt
+pre-commit
+=======
+-e .[test]
+>>>>>>>
