@@ -1,0 +1,9 @@
+<<<<<<<
+ansible
+boto3
+docopt
+semver
+=======
+setuptools
+wheel
+>>>>>>>

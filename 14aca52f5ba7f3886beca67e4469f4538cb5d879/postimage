@@ -1,0 +1,404 @@
+---
+name: build
+
+on:  # yamllint disable-line rule:truthy
+  merge_group:
+    types:
+      - checks_requested
+  # We use the default activity types for the pull_request event as specified here:
+  # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
+  pull_request:
+  push:
+  repository_dispatch:
+    types:
+      - apb
+
+# Set a default shell for any run steps. The `-Eueo pipefail` sets errtrace,
+# nounset, errexit, and pipefail. The `-x` will print all commands as they are
+# run. Please see the GitHub Actions documentation for more information:
+# https://docs.github.com/en/actions/using-jobs/setting-default-values-for-jobs
+defaults:
+  run:
+    shell: bash -Eueo pipefail -x {0}
+
+env:
+  AWS_DEFAULT_REGION: us-east-1
+  # We have seen some failures of packer init in GitHub Actions due to
+  # rate limiting when pulling Packer plugins from GitHub.  Having
+  # Packer use a GitHub API token should reduce this.  The rate
+  # limiting for unauthenticated requests is 60 requests/hour while
+  # the rate limiting for authenticated requests is 5000
+  # requests/hour.
+  PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  PIP_CACHE_DIR: ~/.cache/pip
+  PRE_COMMIT_CACHE_DIR: ~/.cache/pre-commit
+  RUN_TMATE: ${{ secrets.RUN_TMATE }}
+
+jobs:
+  diagnostics:
+    name: Run diagnostics
+    # This job does not need any permissions
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      # Note that a duplicate of this step must be added at the top of
+      # each job.
+      - name: Apply standard cisagov job preamble
+        uses: cisagov/action-job-preamble@v1
+        with:
+          check_github_status: "true"
+          # This functionality is poorly implemented and has been
+          # causing problems due to the MITM implementation hogging or
+          # leaking memory.  As a result we disable it by default.  If
+          # you want to temporarily enable it, simply set
+          # monitor_permissions equal to "true".
+          #
+          # TODO: Re-enable this functionality when practical.  See
+          # cisagov/skeleton-generic#207 for more details.
+          monitor_permissions: "false"
+          output_workflow_context: "true"
+          # Use a variable to specify the permissions monitoring
+          # configuration. By default this will yield the
+          # configuration stored in the cisagov organization-level
+          # variable, but if you want to use a different configuration
+          # then simply:
+          # 1. Create a repository-level variable with the name
+          # ACTIONS_PERMISSIONS_CONFIG.
+          # 2. Set this new variable's value to the configuration you
+          # want to use for this repository.
+          #
+          # Note in particular that changing the permissions
+          # monitoring configuration *does not* require you to modify
+          # this workflow.
+          permissions_monitoring_config: ${{ vars.ACTIONS_PERMISSIONS_CONFIG }}
+  lint:
+    needs:
+      - diagnostics
+    permissions:
+      # actions/checkout needs this to fetch code
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply standard cisagov job preamble
+        uses: cisagov/action-job-preamble@v1
+        with:
+          # This functionality is poorly implemented and has been
+          # causing problems due to the MITM implementation hogging or
+          # leaking memory.  As a result we disable it by default.  If
+          # you want to temporarily enable it, simply set
+          # monitor_permissions equal to "true".
+          #
+          # TODO: Re-enable this functionality when practical.  See
+          # cisagov/skeleton-generic#207 for more details.
+          monitor_permissions: "false"
+          # Use a variable to specify the permissions monitoring
+          # configuration. By default this will yield the
+          # configuration stored in the cisagov organization-level
+          # variable, but if you want to use a different configuration
+          # then simply:
+          # 1. Create a repository-level variable with the name
+          # ACTIONS_PERMISSIONS_CONFIG.
+          # 2. Set this new variable's value to the configuration you
+          # want to use for this repository.
+          #
+          # Note in particular that changing the permissions
+          # monitoring configuration *does not* require you to modify
+          # this workflow.
+          permissions_monitoring_config: ${{ vars.ACTIONS_PERMISSIONS_CONFIG }}
+      - id: setup-env
+        uses: cisagov/setup-env-github-action@v2
+      - uses: actions/checkout@v7
+      - id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.setup-env.outputs.python-version }}
+      # We need the Go version and Go cache location for the actions/cache step,
+      # so the Go installation must happen before that.
+      - id: setup-go
+        uses: actions/setup-go@v7
+        with:
+          # There is no expectation for actual Go code so we disable caching as
+          # it relies on the existence of a go.sum file.
+          cache: false
+          go-version: ${{ steps.setup-env.outputs.go-version }}
+      - id: go-dirs
+        name: Lookup Go directories to cache
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> $GITHUB_OUTPUT
+          echo "gomodcache=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
+      - uses: actions/cache@v6
+        env:
+          BASE_CACHE_KEY: >-
+            ${{ github.job }}-${{ runner.os
+            }}-py${{ steps.setup-python.outputs.python-version
+            }}-go${{ steps.setup-go.outputs.go-version
+            }}-packer${{ steps.setup-env.outputs.packer-version
+            }}-tf${{ steps.setup-env.outputs.terraform-version }}-
+        with:
+          key: >-
+            ${{ env.BASE_CACHE_KEY }}${{ hashFiles(
+            '**/requirements-test.txt',
+            '**/requirements.txt',
+            '**/.pre-commit-config.yaml') }}
+          # Note that the .terraform directory IS NOT included in the
+          # cache because if we were caching, then we would need to use
+          # the `-upgrade=true` option. This option blindly pulls down the
+          # latest modules and providers instead of checking to see if an
+          # update is required. That behavior defeats the benefits of caching.
+          # so there is no point in doing it for the .terraform directory.
+          path: |
+            ${{ env.PIP_CACHE_DIR }}
+            ${{ env.PRE_COMMIT_CACHE_DIR }}
+            ${{ steps.go-dirs.outputs.gocache }}
+            ${{ steps.go-dirs.outputs.gomodcache }}
+          restore-keys: |
+            ${{ env.BASE_CACHE_KEY }}
+      - uses: hashicorp/setup-packer@v3
+        with:
+          version: ${{ steps.setup-env.outputs.packer-version }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ steps.setup-env.outputs.terraform-version }}
+      - name: Install go-critic
+        env:
+          PACKAGE_URL: github.com/go-critic/go-critic/cmd/go-critic
+          PACKAGE_VERSION: ${{ steps.setup-env.outputs.go-critic-version }}
+        run: go install ${PACKAGE_URL}@${PACKAGE_VERSION}
+      - name: Install goimports
+        env:
+          PACKAGE_URL: golang.org/x/tools/cmd/goimports
+          PACKAGE_VERSION: ${{ steps.setup-env.outputs.goimports-version }}
+        run: go install ${PACKAGE_URL}@${PACKAGE_VERSION}
+      - name: Install gosec
+        env:
+          PACKAGE_URL: github.com/securego/gosec/v2/cmd/gosec
+          PACKAGE_VERSION: ${{ steps.setup-env.outputs.gosec-version }}
+        run: go install ${PACKAGE_URL}@${PACKAGE_VERSION}
+      - name: Install staticcheck
+        env:
+          PACKAGE_URL: honnef.co/go/tools/cmd/staticcheck
+          PACKAGE_VERSION: ${{ steps.setup-env.outputs.staticcheck-version }}
+        run: go install ${PACKAGE_URL}@${PACKAGE_VERSION}
+      - name: Install terraform-docs
+        env:
+          PACKAGE_URL: github.com/terraform-docs/terraform-docs
+          PACKAGE_VERSION: ${{ steps.setup-env.outputs.terraform-docs-version }}
+        run: go install ${PACKAGE_URL}@${PACKAGE_VERSION}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install --upgrade --requirement requirements-test.txt
+      - name: Install Ansible roles
+        run: >-
+          ansible-galaxy role install --force
+          --role-file ansible/requirements.yml
+      - name: Install Ansible collections
+        run: >-
+          ansible-galaxy collection install --force
+          --requirements-file ansible/requirements.yml
+      # This must happen before pre-commit is run or the Packer format
+      # linter will throw an error.
+      - name: Install Packer plugins
+        run: packer init .
+      - name: Set up pre-commit hook environments
+        run: pre-commit install-hooks
+      - name: Run pre-commit on all files
+        run: pre-commit run --all-files
+      - name: Setup tmate debug session
+        uses: mxschmitt/action-tmate@v3
+        if: env.RUN_TMATE
+  test:
+    needs:
+      - diagnostics
+    permissions:
+      # actions/checkout needs this to fetch code
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply standard cisagov job preamble
+        uses: cisagov/action-job-preamble@v1
+        with:
+          # This functionality is poorly implemented and has been
+          # causing problems due to the MITM implementation hogging or
+          # leaking memory.  As a result we disable it by default.  If
+          # you want to temporarily enable it, simply set
+          # monitor_permissions equal to "true".
+          #
+          # TODO: Re-enable this functionality when practical.  See
+          # cisagov/skeleton-packer#411 for more details.
+          monitor_permissions: "false"
+          # Use a variable to specify the permissions monitoring
+          # configuration. By default this will yield the
+          # configuration stored in the cisagov organization-level
+          # variable, but if you want to use a different configuration
+          # then simply:
+          # 1. Create a repository-level variable with the name
+          # ACTIONS_PERMISSIONS_CONFIG.
+          # 2. Set this new variable's value to the configuration you
+          # want to use for this repository.
+          #
+          # Note in particular that changing the permissions
+          # monitoring configuration *does not* require you to modify
+          # this workflow.
+          permissions_monitoring_config: ${{ vars.ACTIONS_PERMISSIONS_CONFIG }}
+      - id: setup-env
+        uses: cisagov/setup-env-github-action@v1
+      - uses: actions/checkout@v6
+      - id: setup-python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ steps.setup-env.outputs.python-version }}
+      - uses: actions/cache@v5
+        env:
+          BASE_CACHE_KEY: >-
+            ${{ github.job }}-${{ runner.os }}-py${{
+            steps.setup-python.outputs.python-version }}-packer${{
+            steps.setup-env.outputs.packer-version }}-
+        with:
+          path: |
+            ${{ env.PIP_CACHE_DIR }}
+          key: >-
+            ${{ env.BASE_CACHE_KEY }}${{
+            hashFiles('**/requirements-test.txt') }}-${{
+            hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ env.BASE_CACHE_KEY }}
+      - uses: hashicorp/setup-packer@v3
+        with:
+          version: ${{ steps.setup-env.outputs.packer-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade --requirement requirements-test.txt
+      - name: Run tests
+        env:
+          GITHUB_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: pytest
+      - name: Setup tmate debug session
+        uses: mxschmitt/action-tmate@v3
+        if: env.RUN_TMATE
+  build:
+    environment: dev-a
+    # The AMI build process is an expensive test (in terms of time) so
+    # let's not run it unless the other jobs succeed.
+    needs:
+      - lint
+      - test
+    permissions:
+      # actions/checkout needs this to fetch code
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture:
+          - arm64
+          - x86_64
+    steps:
+      - name: Apply standard cisagov job preamble
+        uses: cisagov/action-job-preamble@v1
+        with:
+          # This functionality is poorly implemented and has been
+          # causing problems due to the MITM implementation hogging or
+          # leaking memory.  As a result we disable it by default.  If
+          # you want to temporarily enable it, simply set
+          # monitor_permissions equal to "true".
+          #
+          # TODO: Re-enable this functionality when practical.  See
+          # cisagov/skeleton-packer#411 for more details.
+          monitor_permissions: "false"
+          # Use a variable to specify the permissions monitoring
+          # configuration. By default this will yield the
+          # configuration stored in the cisagov organization-level
+          # variable, but if you want to use a different configuration
+          # then simply:
+          # 1. Create a repository-level variable with the name
+          # ACTIONS_PERMISSIONS_CONFIG.
+          # 2. Set this new variable's value to the configuration you
+          # want to use for this repository.
+          #
+          # Note in particular that changing the permissions
+          # monitoring configuration *does not* require you to modify
+          # this workflow.
+          permissions_monitoring_config: ${{ vars.ACTIONS_PERMISSIONS_CONFIG }}
+      - id: setup-env
+        uses: cisagov/setup-env-github-action@v1
+      - uses: actions/checkout@v6
+      - id: setup-python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ steps.setup-env.outputs.python-version }}
+      - uses: actions/cache@v5
+        env:
+          BASE_CACHE_KEY: >-
+            ${{ github.job }}-${{ runner.os }}-py${{
+            steps.setup-python.outputs.python-version }}-packer${{
+            steps.setup-env.outputs.packer-version }}-tf-${{
+            steps.setup-env.outputs.terraform-version }}-
+        with:
+          path: |
+            ${{ env.PIP_CACHE_DIR }}
+          key: >-
+            ${{ env.BASE_CACHE_KEY }}${{
+            hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ env.BASE_CACHE_KEY }}
+      - uses: hashicorp/setup-packer@v3
+        with:
+          version: ${{ steps.setup-env.outputs.packer-version }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ steps.setup-env.outputs.terraform-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade \
+                      --requirement requirements.txt
+      - name: Assume AWS build role
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+          role-to-assume: ${{ secrets.BUILD_ROLE_TO_ASSUME }}
+          role-duration-seconds: 3600
+      # When called by Packer, Ansible will find /usr/bin/python3 and
+      # use it; therefore, we must ensure that /usr/bin/python3 points
+      # to the version of Python that we installed in the
+      # actions/setup-python step above.  This can hose other tasks
+      # that are expecting to find the system Python at that location,
+      # though, so we undo this change after running Packer.
+      - name: Create a /usr/bin/python3 symlink to the installed Python
+        run: |
+          sudo mv /usr/bin/python3 /usr/bin/python3-default
+          sudo ln -s ${{ env.pythonLocation }}/bin/python3 \
+          /usr/bin/python3
+      - name: Install Packer plugins
+        run: packer init .
+      # If the AMI to be built via Packer requires anything from the
+      # third-party bucket then you will require this step.
+      # - id: get-third-party-bucket-name
+      #   name: Get the third-party bucket name from SSM Parameter Store
+      #   run: |
+      #     echo name=$(aws ssm get-parameter \
+      #       --name /third_party_bucket_name \
+      #       --output text \
+      #       --query Parameter.Value \
+      #       --with-decryption) >> $GITHUB_OUTPUT
+      - name: Create machine image
+        # Note that if you uncomment the get-third-party-bucket-name
+        # step above then you will likely need to add a line like
+        # this after -timestamp-ui \:
+        # -var build_bucket=${{ steps.get-third-party-bucket-name.outputs.name }} \
+        run: |
+          packer build -only amazon-ebs.${{ matrix.architecture }} \
+            -timestamp-ui \
+            -var github_ref_name=${{ github.ref_name }} \
+            -var github_sha=${{ github.sha }} \
+            .
+      - name: Remove /usr/bin/python3 symlink to the installed Python
+        run: |
+          sudo mv /usr/bin/python3-default /usr/bin/python3
+      - name: Setup tmate debug session
+        uses: mxschmitt/action-tmate@v3
+        if: env.RUN_TMATE

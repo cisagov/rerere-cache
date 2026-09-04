@@ -1,0 +1,29 @@
+# Version 10 is required because the pip-audit pre-commit hook
+# identifies a vulnerability in ansible-core 2.16.13, but all versions
+# of ansible 9 have a dependency on ~=2.16.X.
+#
+# We have tested against version 10.  We want to avoid automatically
+# jumping to another major version without testing, since there are
+# often breaking changes across major versions.  This is the reason
+# for the upper bound.
+ansible>=10,<11
+# ansible-core<2.17.7 suffers from GHSA-99w6-3xph-cx78.
+#
+# Note that any changes made to this dependency must also be made in
+# requirements-test.txt in cisagov/skeleton-ansible-role and
+# .pre-commit-config.yaml in cisagov/skeleton-generic.
+ansible-core>=2.17.7
+# Required because we are using the amazon.aws.ssm_parameter Ansible
+# lookup plugin to pull parameter values from AWS Parameter Store:
+# https://docs.ansible.com/projects/ansible/latest/collections/amazon/aws/ssm_parameter_lookup.html#ansible-collections-amazon-aws-ssm-parameter-lookup
+boto3
+# Required because we are using the community.general.json_query
+# filter in our Ansible code in the
+# cisagov/ansible-role-amazon-efs-utils role:
+# https://docs.ansible.com/projects/ansible/latest/collections/community/general/json_query_filter.html
+jmespath
+# The bump-version script requires at least version 3 of semver.
+semver>=3
+# With setuptools 70.1 and later it is no longer necessary to install
+# wheel alongside setuptools.
+setuptools>=70.1

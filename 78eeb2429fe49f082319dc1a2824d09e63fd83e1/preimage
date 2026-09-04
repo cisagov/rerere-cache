@@ -1,0 +1,13 @@
+.mypy_cache
+.python-version
+<<<<<<<
+.coverage
+.pytest_cache
+.python-version
+*.egg-info
+dist
+packer_cache
+terraform/.terraform
+=======
+__pycache__
+>>>>>>>

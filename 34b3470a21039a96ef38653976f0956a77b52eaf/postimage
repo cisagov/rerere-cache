@@ -1,0 +1,152 @@
+---
+name: build
+
+on:
+  push:
+  pull_request:
+  repository_dispatch:
+    types: [apb]
+
+env:
+  CURL_CACHE_DIR: ~/.cache/curl
+  PIP_CACHE_DIR: ~/.cache/pip
+  PRE_COMMIT_CACHE_DIR: ~/.cache/pre-commit
+  RUN_TMATE: ${{ secrets.RUN_TMATE }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cisagov/setup-env-github-action@develop
+      - uses: actions/checkout@v2
+      - id: setup-python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '1.15'
+      - name: Store installed Go version
+        run: |
+          echo "GO_VERSION="\
+          "$(go version | sed 's/^go version go\([0-9.]\+\) .*/\1/')" \
+          >> $GITHUB_ENV
+      - name: Lookup go cache directory
+        id: go-cache
+        run: |
+          echo "::set-output name=dir::$(go env GOCACHE)"
+      - uses: actions/cache@v2
+        env:
+          BASE_CACHE_KEY: "${{ github.job }}-${{ runner.os }}-\
+            py${{ steps.setup-python.outputs.python-version }}-\
+            go${{ env.GO_VERSION }}-\
+            tf${{ env.TERRAFORM_VERSION }}-"
+        with:
+          # Note that the .terraform directory IS NOT included in the
+          # cache because if we were caching, then we would need to use
+          # the `-upgrade=true` option. This option blindly pulls down the
+          # latest modules and providers instead of checking to see if an
+          # update is required. That behavior defeats the benefits of caching.
+          # so there is no point in doing it for the .terraform directory.
+          path: |
+            ${{ env.PIP_CACHE_DIR }}
+            ${{ env.PRE_COMMIT_CACHE_DIR }}
+            ${{ env.CURL_CACHE_DIR }}
+            ${{ steps.go-cache.outputs.dir }}
+          key: "${{ env.BASE_CACHE_KEY }}\
+            ${{ hashFiles('**/requirements-test.txt') }}-\
+            ${{ hashFiles('**/requirements.txt') }}-\
+            ${{ hashFiles('**/.pre-commit-config.yaml') }}"
+          restore-keys: |
+            ${{ env.BASE_CACHE_KEY }}
+      - name: Install Terraform
+        run: |
+          mkdir -p ${{ env.CURL_CACHE_DIR }}
+          TERRAFORM_ZIP="terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          curl --output ${{ env.CURL_CACHE_DIR }}/"${TERRAFORM_ZIP}" \
+            --time-cond ${{ env.CURL_CACHE_DIR }}/"${TERRAFORM_ZIP}" \
+            --location \
+            "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/${TERRAFORM_ZIP}"
+          sudo unzip -d /opt/terraform \
+            ${{ env.CURL_CACHE_DIR }}/"${TERRAFORM_ZIP}"
+          sudo ln -s /opt/terraform/terraform /usr/bin/terraform
+          sudo mv /usr/local/bin/terraform /usr/local/bin/terraform-default
+          sudo ln -s /opt/terraform/terraform /usr/local/bin/terraform
+      - name: Install Terraform-docs
+        run: GO111MODULE=on go get github.com/terraform-docs/terraform-docs
+      - name: Find and initialize Terraform directories
+        run: |
+          for path in $(find . -not \( -type d -name ".terraform" -prune \) \
+            -type f -iname "*.tf" -exec dirname "{}" \; | sort -u); do \
+            echo "Initializing '$path'..."; \
+            terraform init -input=false -backend=false "$path"; \
+            done
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade --requirement requirements-test.txt
+      - name: Set up pre-commit hook environments
+        run: pre-commit install-hooks
+      - name: Create modified GitHub Actions pre-commit configuration
+        run: |
+          sed '/terraform_validate/d' < .pre-commit-config.yaml \
+          > /tmp/.github-actions-pre-commit-config.yaml
+      - name: Run pre-commit with modified configuration file on all files
+        # We run pre-commit here with a custom configuration that has
+        # the terraform-validate hook removed.  This is because
+        # terraform validate cannot currently run without accessing
+        # the remote state because of the way the providers are
+        # defined in providers.tf.  This is something that may be
+        # remedied in the future.  For more information, check out
+        # these two GitHub issues:
+        # * https://github.com/hashicorp/terraform/issues/15895
+        # * https://github.com/hashicorp/terraform/issues/15811
+        run: |
+          pre-commit run --all-files \
+          --config=/tmp/.github-actions-pre-commit-config.yaml
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cisagov/setup-env-github-action@develop
+      - uses: actions/checkout@v2
+      - id: setup-python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+      - uses: actions/cache@v2
+        env:
+          BASE_CACHE_KEY: "${{ github.job }}-${{ runner.os }}-\
+            py${{ steps.setup-python.outputs.python-version }}-\
+            packer${{ env.PACKER_VERSION }}-"
+        with:
+          path: |
+            ${{ env.PIP_CACHE_DIR }}
+            ${{ env.CURL_CACHE_DIR }}
+          key: "${{ env.BASE_CACHE_KEY }}\
+            ${{ hashFiles('**/requirements-test.txt') }}-\
+            ${{ hashFiles('**/requirements.txt') }}"
+          restore-keys: |
+            ${{ env.BASE_CACHE_KEY }}
+      - name: Install Packer
+        run: |
+          mkdir -p ${{ env.CURL_CACHE_DIR }}
+          PACKER_ZIP="packer_${PACKER_VERSION}_linux_amd64.zip"
+          curl --output ${{ env.CURL_CACHE_DIR }}/"${PACKER_ZIP}" \
+            --time-cond ${{ env.CURL_CACHE_DIR }}/"${PACKER_ZIP}" \
+            --location \
+            "https://releases.hashicorp.com/packer/${PACKER_VERSION}/${PACKER_ZIP}"
+          sudo unzip -o -d /usr/local/bin \
+            ${{ env.CURL_CACHE_DIR }}/"${PACKER_ZIP}"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade --requirement requirements-test.txt
+      - name: Validate Packer configuration
+        run: packer validate src/packer.json
+      - name: Run tests
+        env:
+          GITHUB_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: pytest
+      - name: Setup tmate debug session
+        uses: mxschmitt/action-tmate@v1
+        if: env.RUN_TMATE
