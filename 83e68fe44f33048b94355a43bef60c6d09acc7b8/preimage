@@ -1,0 +1,6 @@
+<<<<<<<
+=======
+docker # Needed for molecule to work correctly
+molecule
+>>>>>>>
+pre-commit
