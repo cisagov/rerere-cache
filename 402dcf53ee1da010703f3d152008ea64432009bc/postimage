@@ -1,0 +1,39 @@
+---
+
+# Any ignore directives should be uncommented in downstream projects to disable
+# Dependabot updates for the given dependency. Downstream projects will get
+# these updates when the pull request(s) in the appropriate skeleton are merged
+# and Lineage processes these changes.
+
+updates:
+  - directory: /
+    ignore:
+      # Managed by cisagov/skeleton-generic
+      - dependency-name: actions/cache
+      - dependency-name: actions/checkout
+      - dependency-name: actions/dependency-review-action
+      - dependency-name: actions/setup-go
+      - dependency-name: actions/setup-python
+      - dependency-name: cisagov/action-job-preamble
+      - dependency-name: cisagov/setup-env-github-action
+      - dependency-name: crazy-max/ghaction-github-labeler
+      - dependency-name: github/codeql-action
+      - dependency-name: hashicorp/setup-packer
+      - dependency-name: hashicorp/setup-terraform
+      - dependency-name: mxschmitt/action-tmate
+    #   # Managed by cisagov/skeleton-action-composite
+    #   - dependency-name: zyactions/semver
+    package-ecosystem: github-actions
+    schedule:
+      interval: weekly
+
+  - directory: /
+    package-ecosystem: pip
+    schedule:
+      interval: weekly
+
+  - directory: /
+    package-ecosystem: terraform
+    schedule:
+      interval: weekly
+version: 2
